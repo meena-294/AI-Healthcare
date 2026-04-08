@@ -1,0 +1,8 @@
+[
+  {
+    "procedure": "MRI Scan",
+    "submitted_code": "MRI123",
+    "correct_code": "MRI456",
+    "denial_reason": "Incorrect procedure code"
+  }
+]
