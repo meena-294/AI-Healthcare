@@ -1,61 +1,48 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
-import uvicorn
- 
+
 from env.environment import HealthcareEnv
 from models.action import ClaimAction
-from agent.rule_based_agent import RuleBasedAgent
- 
-# ✅ GLOBAL INSTANCES
-env = HealthcareEnv()
-agent = RuleBasedAgent()
- 
+
 app = FastAPI()
- 
- 
-# ROOT
+
+env = HealthcareEnv()
+
+# ✅ ROOT
 @app.get("/")
 def home():
-    return {"message": "Healthcare Claim API is running"}
- 
- 
-# ✅ RESET — task_level as query param: POST /reset?task_level=easy
-# Also accepts POST /reset with JSON body {"task_level": "easy"}
+    return {"message": "API running"}
+
+# ✅ RESET (VERY IMPORTANT FIX)
 @app.post("/reset")
 def reset(task_level: str = "easy"):
-    state = env.reset(task_level)
-    return state
- 
- 
-# STATE
+    return env.reset(task_level)
+
+# ✅ ALSO SUPPORT GET (checker safety)
+@app.get("/reset")
+def reset_get(task_level: str = "easy"):
+    return env.reset(task_level)
+
+# ✅ STATE
 @app.get("/state")
-def get_state():
+def state():
     return env.state_manager.get_state()
- 
- 
-# STEP
+
+# ✅ STEP
 class StepRequest(BaseModel):
     action_type: str
     new_code: Optional[str] = None
     justification: Optional[str] = None
- 
- 
+
 @app.post("/step")
-def step(request: StepRequest):
-    action = ClaimAction(
-        action_type=request.action_type,
-        new_code=request.new_code,
-        justification=request.justification
-    )
-    state, reward, done, info = env.step(action)
+def step(req: StepRequest):
+    action = ClaimAction(**req.dict())
+    s, r, d, i = env.step(action)
+
     return {
-        "state": state,
-        "reward": reward,
-        "done": done,
-        "info": info
+        "state": s,
+        "reward": r,
+        "done": d,
+        "info": i
     }
- 
- 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
