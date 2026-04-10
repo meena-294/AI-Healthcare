@@ -1,13 +1,4 @@
-title: AI-Powered_Insurance_Claim_Decision_System
-sdk: docker
----
-title: AI HealthCare Meena
-emoji: 🏥
-colorFrom: blue
-colorTo: cyan
-sdk: docker
-pinned: true
-license: mit
+
 ---
 
 <div align="center">
