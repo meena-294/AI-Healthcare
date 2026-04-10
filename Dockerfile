@@ -7,7 +7,7 @@ COPY . .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Port 8000 is what OpenEnv checker expects
-EXPOSE 8000
+EXPOSE 7860
 
 # Use uvicorn to serve the FastAPI app
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
