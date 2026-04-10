@@ -1,0 +1,36 @@
+name: healthcare-claim-env
+
+description: >
+  A real-world simulation of healthcare insurance claim denial resolution.
+  Agents must analyze denied claims, fix errors, and resubmit based on policy rules.
+
+version: 1.0
+
+tasks:
+  - name: easy
+    description: Fix incorrect procedure code
+  - name: medium
+    description: Fix code and provide justification
+  - name: hard
+    description: Full claim resolution with policy compliance
+
+observation_space:
+  type: object
+  properties:
+    claim_id: string
+    patient_age: integer
+    procedure: string
+    submitted_code: string
+    denial_reason: string
+    policy: string
+
+action_space:
+  type: object
+  properties:
+    action_type: string
+    new_code: string
+    justification: string
+
+reward:
+  type: float
+  range: [-1.0, 1.0]
