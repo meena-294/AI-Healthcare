@@ -1,3 +1,4 @@
+# ── Base image ────────────────────────────────────────────────────────────────
 FROM python:3.10-slim
 
 # ── System deps ───────────────────────────────────────────────────────────────
@@ -12,13 +13,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── Copy full project ─────────────────────────────────────────────────────────
-# Root files
-COPY uiapp.py      .
+# ── Root-level Python files ───────────────────────────────────────────────────
 COPY server/app.py        .
 COPY inference.py  .
 
-# Package folders (must match your imports exactly)
+# ── Package folders ───────────────────────────────────────────────────────────
 COPY env/          ./env/
 COPY models/       ./models/
 COPY agent/        ./agent/
@@ -32,9 +31,7 @@ EXPOSE 7860
 
 # ── Environment variables ─────────────────────────────────────────────────────
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    GRADIO_SERVER_NAME=0.0.0.0 \
-    GRADIO_SERVER_PORT=7860
+    PYTHONDONTWRITEBYTECODE=1
 
-# ── Launch the Gradio UI ──────────────────────────────────────────────────────
-CMD ["python", "uiapp.py"]
+# ── Run unified server (FastAPI + Gradio on same port) ───────────────────────
+CMD ["python", "app.py"]
