@@ -1,48 +1,34 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import Optional
-
 from env.environment import HealthcareEnv
 from models.action import ClaimAction
+from agent.rule_based_agent import RuleBasedAgent
 
 app = FastAPI()
 
 env = HealthcareEnv()
+agent = RuleBasedAgent()
 
-# ✅ ROOT
-@app.get("/")
-def home():
-    return {"message": "API running"}
-
-# ✅ RESET (VERY IMPORTANT FIX)
-@app.post("/reset")
-def reset(task_level: str = "easy"):
-    return env.reset(task_level)
-
-# ✅ ALSO SUPPORT GET (checker safety)
-@app.get("/reset")
-def reset_get(task_level: str = "easy"):
-    return env.reset(task_level)
-
-# ✅ STATE
-@app.get("/state")
-def state():
-    return env.state_manager.get_state()
-
-# ✅ STEP
 class StepRequest(BaseModel):
-    action_type: str
-    new_code: Optional[str] = None
-    justification: Optional[str] = None
+    action: dict
+
+@app.post("/reset")
+def reset(payload: dict = {}):
+    difficulty = payload.get("difficulty", "easy") if payload else "easy"
+    obs = env.reset(difficulty)
+    return obs
 
 @app.post("/step")
-def step(req: StepRequest):
-    action = ClaimAction(**req.dict())
-    s, r, d, i = env.step(action)
-
+def step(request: StepRequest):
+    action = ClaimAction(**request.action)
+    obs, reward, done, info = env.step(action)
     return {
-        "state": s,
-        "reward": r,
-        "done": d,
-        "info": i
+        "observation": obs,
+        "reward": reward,
+        "done": done,
+        "info": info
     }
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
