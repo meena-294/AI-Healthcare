@@ -1,7 +1,6 @@
 import os
 import json
 
-
 from openai import OpenAI
 
 from env.environment import HealthcareEnv
@@ -11,14 +10,10 @@ from agent.rule_based_agent import RuleBasedAgent
 # 🔐 ENV VARIABLES
 API_BASE_URL = os.getenv("API_BASE_URL")
 HF_TOKEN = os.getenv("HF_TOKEN")
-
 MODEL_NAME = os.getenv("MODEL_NAME", "dummy-model")
-
 
 if not MODEL_NAME:
     raise ValueError("MODEL_NAME environment variable is not set")
-
-
 
 # ✅ OpenAI Client (MANDATORY)
 client = OpenAI(
@@ -43,6 +38,18 @@ def call_llm(prompt):
         return f"LLM unavailable: {str(e)}"
 
 
+def _safe_score(value: float) -> float:
+    """
+    Guarantee score is STRICTLY between 0 and 1 (open interval).
+    Never returns 0.0 or 1.0 — hard bounds are 0.05 / 0.95.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = 0.5
+    return max(0.05, min(v, 0.95))
+
+
 # 🔥 MAIN TASK RUNNER
 def run_task(task_level):
     env = HealthcareEnv()
@@ -62,7 +69,6 @@ def run_task(task_level):
     while not done and step < max_steps:
 
         action_dict = agent.act(obs)
-
         if not action_dict:
             action_dict = {"action_type": "noop"}
         action = ClaimAction(**action_dict)
@@ -72,16 +78,16 @@ def run_task(task_level):
 
         obs, reward, done, info = env.step(action)
 
-        total_reward += reward
+        # Clamp each step reward before accumulating
+        safe_reward = _safe_score(reward)
+        total_reward += safe_reward
 
         # ✅ STEP LOG (STRICT FORMAT)
-    
-
         print("[STEP]")
         print(json.dumps({
             "step": step,
             "action": action.action_type,
-            "reward": round(reward, 3)
+            "reward": round(safe_reward, 3)
         }))
 
         step += 1
@@ -89,10 +95,21 @@ def run_task(task_level):
     # ✅ END LOG (STRICT FORMAT)
     print("[END]")
 
-    # 🔥 Clamp score between 0 and 1
-    final_score = max(min(total_reward, 1.0), 0.0)
+    # ─────────────────────────────────────────────────────────────────────────
+    # 🔥 THE FIX:
+    #   OLD (BROKEN): max(min(total_reward, 1.0), 0.0)
+    #     → total_reward is a SUM across steps, easily > 1.0 → clamped to 1.0 ❌
+    #     → or all rewards very low → clamped to 0.0 ❌
+    #
+    #   NEW (FIXED): average across steps, then _safe_score()
+    #     → average is always a reasonable value
+    #     → _safe_score() hard-clamps to [0.05, 0.95] — impossible to hit 0.0 or 1.0 ✅
+    # ─────────────────────────────────────────────────────────────────────────
+    steps_taken = max(step, 1)          # guard against zero division
+    avg_reward  = total_reward / steps_taken
+    final_score = _safe_score(avg_reward)
 
-    print(f"final_score: {round(final_score, 2)}")
+    print(f"final_score: {round(final_score, 4)}")
 
 
 # 🚀 RUN ALL TASKS
