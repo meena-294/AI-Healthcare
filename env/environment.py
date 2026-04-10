@@ -7,8 +7,14 @@ from grader.medium_grader import MediumGrader
 from grader.hard_grader import HardGrader
 from reward.reward_calculator import RewardCalculator
 
-# Reward must NEVER be exactly 0.0 or 1.0
-_EPSILON = 0.01
+# Reward must NEVER be exactly 0.0 or 1.0 — use wide safe margins
+_FLOOR   = 0.05
+_CEILING = 0.95
+
+
+def _strict_clamp(value: float) -> float:
+    """Triple-safety clamp: floor=0.05, ceiling=0.95. Impossible to return 0.0 or 1.0."""
+    return max(_FLOOR, min(float(value), _CEILING))
 
 
 class HealthcareEnv:
@@ -31,7 +37,7 @@ class HealthcareEnv:
         if self.done:
             return (
                 self._get_observation(self.state_manager.get_state()),
-                _EPSILON,          # never return 0.0
+                _FLOOR,   # episode already done → safe floor, never 0.0
                 True,
                 {"message": "Episode already completed"},
             )
@@ -55,9 +61,9 @@ class HealthcareEnv:
     # ── REWARD ────────────────────────────────────────────────────────────────
     def _calculate_reward_with_grader(self, claim, action, result) -> float:
 
-        # Invalid action → near-minimum penalty (not exactly -1.0 / 0.0)
+        # Invalid action → safe floor (never 0.0)
         if not result.get("valid", True):
-            return _EPSILON   # small positive, strictly > 0
+            return _FLOOR
 
         # Select grader
         if self.task_level == "easy":
@@ -67,7 +73,8 @@ class HealthcareEnv:
         else:
             grader = HardGrader(claim)
 
-        grader_score = grader.grade(action)   # already in (0,1)
+        # grader.grade() already returns value in [0.05, 0.95]
+        grader_score = grader.grade(action)
 
         reward_calc = RewardCalculator(claim)
         reward = reward_calc.compute(
@@ -77,7 +84,7 @@ class HealthcareEnv:
             max_steps    = self.max_steps,
         )
 
-        # Final strict clamp — belt AND suspenders
+        # Final clamp — belt, suspenders, AND safety pin
         return _strict_clamp(reward)
 
     # ── DONE ─────────────────────────────────────────────────────────────────
@@ -96,7 +103,7 @@ class HealthcareEnv:
             "patient_age":    state.get("patient_age"),
             "procedure":      state.get("procedure"),
             "submitted_code": state.get("submitted_code"),
-            "correct_code":   state.get("correct_code"),   # expose so agent can use it
+            "correct_code":   state.get("correct_code"),
             "denial_reason":  state.get("denial_reason"),
             "policy":         state.get("policy"),
             "documents":      state.get("documents", []),
@@ -105,10 +112,3 @@ class HealthcareEnv:
     # ── STATE (OpenEnv) ──────────────────────────────────────────────────────
     def state(self) -> dict:
         return self.state_manager.get_state() or {"status": "running"}
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _strict_clamp(value: float) -> float:
-    """Guarantee value is strictly in the open interval (0, 1)."""
-    return max(_EPSILON, min(value, 1.0 - _EPSILON))
