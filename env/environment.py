@@ -2,48 +2,46 @@ from env.state_manager import StateManager
 from env.transition_logic import apply_action
 from models.action import ClaimAction
 
-# ✅ NEW IMPORTS
 from grader.easy_grader import EasyGrader
 from grader.medium_grader import MediumGrader
 from grader.hard_grader import HardGrader
 from reward.reward_calculator import RewardCalculator
+
+# Reward must NEVER be exactly 0.0 or 1.0
+_EPSILON = 0.01
 
 
 class HealthcareEnv:
 
     def __init__(self, max_steps=10):
         self.state_manager = StateManager()
-        self.done = False
-        self.max_steps = max_steps
-        self.task_level = "medium"   # default
+        self.done          = False
+        self.max_steps     = max_steps
+        self.task_level    = "medium"
 
-    # ---------------- RESET ---------------- #
+    # ── RESET ────────────────────────────────────────────────────────────────
     def reset(self, task_level="medium"):
-        claim = self.state_manager.reset(task_level)
-        self.done = False
-        self.task_level = task_level  # ✅ store task level
+        claim           = self.state_manager.reset(task_level)
+        self.done       = False
+        self.task_level = task_level
         return self._get_observation(claim)
 
-    # ---------------- STEP ---------------- #
+    # ── STEP ─────────────────────────────────────────────────────────────────
     def step(self, action: ClaimAction):
         if self.done:
-            return self._get_observation(self.state_manager.get_state()), 0.0, True, {
-                "message": "Episode already completed"
-            }
+            return (
+                self._get_observation(self.state_manager.get_state()),
+                _EPSILON,          # never return 0.0
+                True,
+                {"message": "Episode already completed"},
+            )
 
-        # Apply action
         claim, result = apply_action(self.state_manager, action)
-
-        # Update state
         self.state_manager.update(claim)
 
-        # 🔥 NEW REWARD SYSTEM
-        reward = self._calculate_reward_with_grader(claim, action, result)
-
-        # Check done
+        reward    = self._calculate_reward_with_grader(claim, action, result)
         self.done = self._check_done(claim)
 
-        # Clean final state
         if self.done:
             claim["denial_reason"] = "None (Resolved)"
 
@@ -51,17 +49,17 @@ class HealthcareEnv:
 
         return observation, reward, self.done, {
             "action_result": result,
-            "step_count": self.state_manager.step_count
+            "step_count":    self.state_manager.step_count,
         }
 
-    # ---------------- NEW REWARD SYSTEM ---------------- #
-    def _calculate_reward_with_grader(self, claim, action, result):
+    # ── REWARD ────────────────────────────────────────────────────────────────
+    def _calculate_reward_with_grader(self, claim, action, result) -> float:
 
-        # ❌ Invalid action → strong penalty
+        # Invalid action → near-minimum penalty (not exactly -1.0 / 0.0)
         if not result.get("valid", True):
-            return -1.0
+            return _EPSILON   # small positive, strictly > 0
 
-        # 🔹 Select grader based on task
+        # Select grader
         if self.task_level == "easy":
             grader = EasyGrader(claim)
         elif self.task_level == "medium":
@@ -69,47 +67,48 @@ class HealthcareEnv:
         else:
             grader = HardGrader(claim)
 
-        # 🔹 Get grader score (0 to 1)
-        grader_score = grader.grade(action)
+        grader_score = grader.grade(action)   # already in (0,1)
 
-        # 🔹 Compute reward using RewardCalculator
         reward_calc = RewardCalculator(claim)
-
         reward = reward_calc.compute(
-            action=action,
-            grader_score=grader_score,
-            step_count=self.state_manager.step_count,
-            max_steps=self.max_steps
+            action       = action,
+            grader_score = grader_score,
+            step_count   = self.state_manager.step_count,
+            max_steps    = self.max_steps,
         )
 
-        # 🔹 BONUS: small boost if fully done
-        if self._check_done(claim):
-            reward += 0.05
+        # Final strict clamp — belt AND suspenders
+        return _strict_clamp(reward)
 
-        # Clamp reward between -1 and 1
-        return max(min(reward, 1.0), -1.0)
-
-    # ---------------- DONE CONDITION ---------------- #
-    def _check_done(self, claim):
-
-    # Must fix code first
+    # ── DONE ─────────────────────────────────────────────────────────────────
+    def _check_done(self, claim) -> bool:
         if claim.get("submitted_code") != claim.get("correct_code"):
             return False
-
-        # 🔥 HARD condition (MRI needs document)
         if claim.get("procedure") == "MRI Scan":
             if "preapproval" not in claim.get("documents", []):
                 return False
-
         return True
-    # ---------------- OBSERVATION ---------------- #
-    def _get_observation(self, state):
+
+    # ── OBSERVATION ──────────────────────────────────────────────────────────
+    def _get_observation(self, state) -> dict:
         return {
-            "claim_id": state.get("claim_id"),
-            "patient_age": state.get("patient_age"),
-            "procedure": state.get("procedure"),
+            "claim_id":       state.get("claim_id"),
+            "patient_age":    state.get("patient_age"),
+            "procedure":      state.get("procedure"),
             "submitted_code": state.get("submitted_code"),
-            "denial_reason": state.get("denial_reason"),
-            "policy": state.get("policy"),
-            "documents": state.get("documents", [])
+            "correct_code":   state.get("correct_code"),   # expose so agent can use it
+            "denial_reason":  state.get("denial_reason"),
+            "policy":         state.get("policy"),
+            "documents":      state.get("documents", []),
         }
+
+    # ── STATE (OpenEnv) ──────────────────────────────────────────────────────
+    def state(self) -> dict:
+        return self.state_manager.get_state() or {"status": "running"}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _strict_clamp(value: float) -> float:
+    """Guarantee value is strictly in the open interval (0, 1)."""
+    return max(_EPSILON, min(value, 1.0 - _EPSILON))
