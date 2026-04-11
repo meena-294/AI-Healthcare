@@ -2,10 +2,15 @@ import math
 
 
 def _clamp(v):
-    try: v = float(v)
-    except: return 0.5
-    if not math.isfinite(v): return 0.5
-    return max(0.15, min(v, 0.85))
+    try:
+        v = float(v)
+    except Exception:
+        return 0.5
+    if not math.isfinite(v):
+        return 0.5
+    # This keeps scores strictly between 0.1 and 0.9
+    # It ensures you never hit 0.0 or 1.0
+    return max(0.1, min(v, 0.9))
 
 
 class MediumGrader:
