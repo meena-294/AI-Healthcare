@@ -1,21 +1,24 @@
 import math
 
+_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
-def _clamp(v):
+def _safe_bucket(v) -> float:
     try:
         v = float(v)
     except Exception:
         return 0.5
     if not math.isfinite(v):
         return 0.5
-    # Strictly between 0 and 1 — never 0.0 or 1.0
-    return max(0.01, min(v, 0.99))
+    if v <= 0.0: return 0.1
+    if v >= 1.0: return 0.9
+    return min(_BUCKETS, key=lambda b: abs(b - v))
 
 
 class EasyGrader:
     """
     Easy task: agent must correct the procedure code.
-    Score is strictly in (0, 1) — never 0.0 or 1.0 exactly.
+    Score is ALWAYS one of: 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9
+    NEVER 0.0 or 1.0
     """
 
     def __init__(self, claim):
@@ -26,27 +29,21 @@ class EasyGrader:
             submitted = self.claim.get("submitted_code", "")
             correct   = self.claim.get("correct_code", "")
 
-            # Start with a safe base score
-            raw = 0.20
-
             if action.action_type == "correct_code" and action.new_code:
                 if action.new_code == correct:
-                    raw = 0.85      # High but never 1.0
+                    raw = 0.85
                 elif action.new_code != submitted:
-                    raw = 0.50      # Attempted fix, wrong code
+                    raw = 0.50
                 else:
-                    raw = 0.30      # Submitted same wrong code
-
+                    raw = 0.30
             elif action.action_type == "add_document":
                 raw = 0.40
-
             elif action.action_type == "appeal":
                 raw = 0.35
-
             else:
-                raw = 0.15          # noop / unknown
+                raw = 0.20   # noop / unknown
 
-            return _clamp(raw)
+            return _safe_bucket(raw)
 
         except Exception:
             return 0.5
