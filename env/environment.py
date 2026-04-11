@@ -9,18 +9,25 @@ from grader.medium_grader import MediumGrader
 from grader.hard_grader import HardGrader
 from reward.reward_calculator import RewardCalculator
 
-_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
-def _safe_bucket(v) -> float:
+# ✅ STRICT CLAMP — NEVER RETURNS 0.0 OR 1.0
+def _strict_clamp(v: float) -> float:
     try:
         v = float(v)
     except Exception:
         return 0.5
+
     if not math.isfinite(v):
         return 0.5
-    if v <= 0.0: return 0.1
-    if v >= 1.0: return 0.9
-    return min(_BUCKETS, key=lambda b: abs(b - v))
+
+    # HARD boundary protection
+    if v <= 0.0:
+        return 0.01
+    if v >= 1.0:
+        return 0.99
+
+    # Extra safety buffer
+    return max(0.01, min(0.99, v))
 
 
 class HealthcareEnv:
@@ -31,17 +38,19 @@ class HealthcareEnv:
         self.max_steps     = max_steps
         self.task_level    = "medium"
 
+    # ── RESET ────────────────────────────────────────────────────────────────
     def reset(self, task_level="medium"):
         claim           = self.state_manager.reset(task_level)
         self.done       = False
         self.task_level = task_level
         return self._get_observation(claim)
 
+    # ── STEP ─────────────────────────────────────────────────────────────────
     def step(self, action: ClaimAction):
         if self.done:
             return (
                 self._get_observation(self.state_manager.get_state()),
-                0.1,    # safe — never 0.0
+                0.01,  # NEVER return 0.0
                 True,
                 {"message": "Episode already completed"},
             )
@@ -49,7 +58,7 @@ class HealthcareEnv:
         claim, result = apply_action(self.state_manager, action)
         self.state_manager.update(claim)
 
-        reward    = self._calculate_reward(claim, action, result)
+        reward    = self._calculate_reward_with_grader(claim, action, result)
         self.done = self._check_done(claim)
 
         if self.done:
@@ -60,10 +69,14 @@ class HealthcareEnv:
             "step_count":    self.state_manager.step_count,
         }
 
-    def _calculate_reward(self, claim, action, result) -> float:
-        if not result.get("valid", True):
-            return 0.1      # safe — never 0.0
+    # ── REWARD ────────────────────────────────────────────────────────────────
+    def _calculate_reward_with_grader(self, claim, action, result) -> float:
 
+        # ❌ Invalid action → small epsilon (NOT 0 or negative)
+        if not result.get("valid", True):
+            return 0.01
+
+        # Select correct grader
         if self.task_level == "easy":
             grader = EasyGrader(claim)
         elif self.task_level == "medium":
@@ -71,7 +84,8 @@ class HealthcareEnv:
         else:
             grader = HardGrader(claim)
 
-        grader_score = _safe_bucket(grader.grade(action))
+        # Already safe (0.01–0.99)
+        grader_score = grader.grade(action)
 
         reward_calc = RewardCalculator(claim)
         reward = reward_calc.compute(
@@ -81,16 +95,21 @@ class HealthcareEnv:
             max_steps    = self.max_steps,
         )
 
-        return _safe_bucket(reward)     # triple-checked here
+        # ✅ FINAL GUARANTEE — NOTHING ESCAPES THIS
+        return _strict_clamp(reward)
 
+    # ── DONE CONDITION ───────────────────────────────────────────────────────
     def _check_done(self, claim) -> bool:
         if claim.get("submitted_code") != claim.get("correct_code"):
             return False
+
         if claim.get("procedure") == "MRI Scan":
             if "preapproval" not in claim.get("documents", []):
                 return False
+
         return True
 
+    # ── OBSERVATION ──────────────────────────────────────────────────────────
     def _get_observation(self, state) -> dict:
         return {
             "claim_id":       state.get("claim_id"),
@@ -103,5 +122,6 @@ class HealthcareEnv:
             "documents":      state.get("documents", []),
         }
 
+    # ── STATE ────────────────────────────────────────────────────────────────
     def state(self) -> dict:
         return self.state_manager.get_state() or {"status": "running"}
