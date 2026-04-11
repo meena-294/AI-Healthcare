@@ -1,15 +1,17 @@
 import math
 
+_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
-def _strict_clamp(v: float) -> float:
-    """Score must be strictly in open interval (0, 1). Never 0.0 or 1.0."""
+def _safe_bucket(v) -> float:
     try:
         v = float(v)
     except Exception:
         return 0.5
     if not math.isfinite(v):
         return 0.5
-    return max(0.01, min(v, 0.99))
+    if v <= 0.0: return 0.1
+    if v >= 1.0: return 0.9
+    return min(_BUCKETS, key=lambda b: abs(b - v))
 
 
 class BaseGrader:
@@ -18,8 +20,6 @@ class BaseGrader:
 
     def grade(self, action) -> float:
         raise NotImplementedError("Subclasses must implement grade()")
-
-    # ── Utility helpers ───────────────────────────────────────────────────────
 
     def is_correct_code(self, action) -> bool:
         return action.new_code == self.claim.get("correct_code")
