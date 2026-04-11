@@ -1,22 +1,17 @@
 import math
 
 
-def _strict_clamp(value: float) -> float:
+def _clamp(v):
     try:
-        v = float(value)
+        v = float(v)
     except Exception:
         return 0.5
     if not math.isfinite(v):
         return 0.5
-    return max(0.1, min(v, 0.9))
+    return max(0.15, min(v, 0.85))
 
 
 class MediumGrader:
-    """
-    Medium task: agent must correct the code AND provide justification.
-    Score is STRICTLY in (0.1, 0.9) ⊂ (0, 1) — never 0.0 or 1.0.
-    """
-
     def __init__(self, claim):
         self.claim = claim
 
@@ -24,29 +19,30 @@ class MediumGrader:
         submitted = self.claim.get("submitted_code", "")
         correct   = self.claim.get("correct_code", "")
 
-        score = 0.10  # safe non-zero base
+        score = 0.15  # safe base
 
         if action.action_type == "correct_code" and action.new_code:
             if action.new_code == correct:
-                score += 0.50
+                score += 0.42
             elif action.new_code != submitted:
-                score += 0.22
+                score += 0.20
             else:
-                score += 0.04
+                score += 0.03
 
-            justification = action.justification or ""
-            j_len = len(justification.strip())
+            j = action.justification or ""
+            j_len = len(j.strip())
             if j_len >= 20:
-                score += 0.25
+                score += 0.20
             elif j_len >= 10:
-                score += 0.13
+                score += 0.10
             elif j_len > 0:
-                score += 0.06
+                score += 0.05
 
         elif action.action_type == "add_document":
-            score += 0.14
-
+            score += 0.12
         elif action.action_type == "appeal":
-            score += 0.09
+            score += 0.08
+        # noop stays at base 0.15
 
-        return _strict_clamp(score)
+        # Max: 0.15 + 0.42 + 0.20 = 0.77 → clamped to 0.85 ✓
+        return _clamp(score)
