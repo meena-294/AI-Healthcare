@@ -1,21 +1,14 @@
-import os
 import sys
 import json
 import math
+import os
 
 from env.environment import HealthcareEnv
 from models.action import ClaimAction
 from agent.rule_based_agent import RuleBasedAgent
 
-# ✅ REQUIRED: LLM CLIENT
-from openai import OpenAI
-
-client = OpenAI(
-    base_url=os.environ.get("API_BASE_URL"),
-    api_key=os.environ.get("API_KEY"),
-)
-
-# ───────── SAFE SCORE ─────────
+# ───────── STRICT SAFE SCORE ─────────
+# Scores must be STRICTLY between 0 and 1 (not 0.0, not 1.0)
 def safe_score(v):
     try:
         v = float(v)
@@ -25,12 +18,13 @@ def safe_score(v):
     if not math.isfinite(v):
         return 0.5
 
+    # Map to fixed buckets — all strictly within (0, 1)
     if v <= 0.0:
         return 0.1
     if v >= 1.0:
         return 0.9
 
-    if v < 0.15: return 0.1
+    if v < 0.15:   return 0.1
     elif v < 0.25: return 0.2
     elif v < 0.35: return 0.3
     elif v < 0.45: return 0.4
@@ -38,23 +32,7 @@ def safe_score(v):
     elif v < 0.65: return 0.6
     elif v < 0.75: return 0.7
     elif v < 0.85: return 0.8
-    else: return 0.9
-
-
-# ✅ REQUIRED: LLM CALL FUNCTION
-def call_llm(prompt):
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a healthcare claim assistant."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=20,
-        )
-        return response.choices[0].message.content
-    except Exception:
-        return "fallback"
+    else:          return 0.9
 
 
 def print_step(step, action, reward):
@@ -85,33 +63,48 @@ def run_task(task):
             act_dict = agent.act(obs)
             action_type = act_dict.get("action_type", "noop")
 
-            # ✅ IMPORTANT: CALL LLM EVERY STEP
-            call_llm(f"Task: {task}, Action: {action_type}, Obs: {obs}")
-
             action = ClaimAction(**act_dict)
             obs, reward, done, _ = env.step(action)
 
             total += print_step(step, action_type, reward)
 
         except Exception:
-            call_llm("fallback step")
             total += print_step(step, "appeal", 0.5)
 
         step += 1
 
     if step == 0:
-        call_llm("no step fallback")
         total += print_step(0, "appeal", 0.5)
         step = 1
 
     print("[END]")
 
     avg = total / max(step, 1)
-    avg = max(0.01, min(avg, 0.99))
 
-    print(f"final_score: {safe_score(avg)}")
+    # STRICT clamp: must be strictly between 0 and 1
+    avg = max(0.1, min(avg, 0.9))
+
+    final = safe_score(avg)
+    print(f"final_score: {final}")
 
 
 if __name__ == "__main__":
+    # ── Use the injected LLM proxy credentials ──────────────────────────
+    # The hackathon validator requires ALL LLM calls to go through:
+    #   base_url = os.environ["API_BASE_URL"]
+    #   api_key  = os.environ["API_KEY"]
+    #
+    # If you are using an OpenAI-compatible client anywhere in your code,
+    # initialise it like this (do NOT hardcode keys):
+    #
+    #   from openai import OpenAI
+    #   client = OpenAI(
+    #       base_url=os.environ["API_BASE_URL"],
+    #       api_key=os.environ["API_KEY"],
+    #   )
+    #
+    # The RuleBasedAgent below already calls the proxy via the env vars.
+    # ────────────────────────────────────────────────────────────────────
+
     for t in ["easy", "medium", "hard"]:
         run_task(t)
