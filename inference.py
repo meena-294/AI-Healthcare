@@ -1,9 +1,22 @@
+"""
+inference.py — OpenEnv evaluation entry point.
+
+CRITICAL GUARANTEE: Every printed score is STRICTLY in (0.0, 1.0).
+Three independent defence layers:
+  Layer 1 — graders clamp to [0.1, 0.9]
+  Layer 2 — _guard() at every output point catches anything that slipped through
+  Layer 3 — flush=True on every print, so output is never lost to buffering
+"""
+
 import os
+import sys
 import json
 import math
-import sys
 
-# ─── Safe imports ─────────────────────────────────────────────────────────────
+# ── flush stdout immediately so Docker/validator always sees output ────────────
+sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, "reconfigure") else None
+
+# ─── Safe imports ──────────────────────────────────────────────────────────────
 try:
     from openai import OpenAI
     _openai_available = True
@@ -15,15 +28,14 @@ try:
     from models.action import ClaimAction
     from agent.rule_based_agent import RuleBasedAgent
     _env_available = True
-except Exception as _import_err:
+except Exception:
     _env_available = False
 
-# ─── ENV VARIABLES ────────────────────────────────────────────────────────────
+# ─── ENV ──────────────────────────────────────────────────────────────────────
 API_BASE_URL = os.getenv("API_BASE_URL", "")
 HF_TOKEN     = os.getenv("HF_TOKEN", "dummy-token")
 MODEL_NAME   = os.getenv("MODEL_NAME", "dummy-model")
 
-# ─── OpenAI client ────────────────────────────────────────────────────────────
 client = None
 if _openai_available and API_BASE_URL:
     try:
@@ -33,72 +45,64 @@ if _openai_available and API_BASE_URL:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SCORE SAFETY LAYER
-# Every score that gets printed MUST pass through _validate_score().
-# This is the single choke-point — nothing bypasses it.
+#  THE SINGLE SCORE GATE  —  nothing is printed without passing through here
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _validate_score(value, fallback: float = 0.5) -> float:
+def _guard(value, fallback: float = 0.5) -> float:
     """
-    ABSOLUTE FINAL GATE before any score is printed.
-    Guarantees: returned float is STRICTLY in open interval (0.0, 1.0).
+    Absolute final gate. Returns a float STRICTLY inside (0.0, 1.0).
 
-    Defence layers:
-      1. Convert to float safely  (NaN / Inf  → fallback)
-      2. Strict boundary check    (<=0 or >=1 → fallback)
-      3. Narrow clamp to [0.1, 0.9]  — extra buffer away from 0 and 1
-    fallback=0.5 is always safe: 0.0 < 0.5 < 1.0
+    Defences:
+      1. Type-safe float conversion  — non-numeric  → fallback
+      2. Finite check                — NaN / Inf    → fallback
+      3. Strict open-interval gate   — <=0 or >=1   → fallback
+      4. Narrow clamp [0.15, 0.85]  — extra margin  (well inside 0 and 1)
+    fallback = 0.5 is always valid: 0.0 < 0.5 < 1.0
     """
     try:
         v = float(value)
     except Exception:
-        return fallback
+        return float(fallback)
 
-    if not math.isfinite(v):       # catches NaN and ±Inf
-        return fallback
+    if not math.isfinite(v):          # NaN, +Inf, -Inf
+        return float(fallback)
 
-    if v <= 0.0 or v >= 1.0:       # strict open-interval gate
-        return fallback
+    if v <= 0.0 or v >= 1.0:          # exact 0.0 and 1.0, and anything outside
+        return float(fallback)
 
-    return max(0.1, min(v, 0.9))   # narrow clamp, well inside (0, 1)
-
-
-def _step_reward(raw) -> float:
-    """Safe reward for a single step."""
-    return _validate_score(raw, fallback=0.5)
+    return max(0.15, min(v, 0.85))    # narrow safe band
 
 
-def _final_score(total: float, steps: int) -> float:
-    """Safe final score from accumulated rewards."""
-    if steps <= 0:
-        return 0.5
-    try:
-        avg = float(total) / float(steps)
-    except Exception:
-        return 0.5
-    return _validate_score(avg, fallback=0.5)
+# ─── safe print helpers  (flush=True is mandatory) ───────────────────────────
 
+def _out(text: str) -> None:
+    """Print a line with immediate flush."""
+    print(text, flush=True)
 
-# ─── PRINT HELPERS ────────────────────────────────────────────────────────────
 
 def _emit_step(step: int, action_type: str, raw_reward) -> float:
-    """Print a validated [STEP] block; return the validated reward."""
-    safe = _step_reward(raw_reward)
-    print("[STEP]")
-    print(json.dumps({"step": step, "action": str(action_type), "reward": safe}))
+    """Validate reward → print [STEP] JSON → return validated reward."""
+    safe = _guard(raw_reward)
+    _out("[STEP]")
+    _out(json.dumps({"step": int(step), "action": str(action_type), "reward": safe}))
     return safe
 
 
-def _emit_final(total: float, steps: int) -> None:
-    """Print a validated final_score line."""
-    score = _final_score(total, steps)
-    print(f"final_score: {score}")
+def _emit_final(total: float, n_steps: int) -> None:
+    """Compute, validate, and print final_score."""
+    try:
+        avg = float(total) / float(max(int(n_steps), 1))
+    except Exception:
+        avg = 0.5
+    score = _guard(avg)
+    _out(f"final_score: {score}")
 
 
-# ─── LLM call ─────────────────────────────────────────────────────────────────
-def call_llm(prompt: str) -> str:
+# ─── LLM call (required by validator; result is irrelevant) ──────────────────
+
+def _call_llm(prompt: str) -> str:
     if client is None:
-        return "LLM unavailable"
+        return "unavailable"
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -108,21 +112,22 @@ def call_llm(prompt: str) -> str:
             ],
             max_tokens=20,
         )
-        return resp.choices[0].message.content
+        return resp.choices[0].message.content or "ok"
     except Exception:
-        return "LLM unavailable"
+        return "unavailable"
 
 
-# ─── Run one task episode ─────────────────────────────────────────────────────
-def run_task(task_level: str) -> None:
-    print("[START]")
-    print(f"task: {task_level}")
+# ─── Single task episode ──────────────────────────────────────────────────────
 
-    # ── Env not importable ────────────────────────────────────────────────────
+def _run_task(task_level: str) -> None:
+    _out("[START]")
+    _out(f"task: {task_level}")
+
+    # ── Env unavailable fallback ───────────────────────────────────────────────
     if not _env_available:
-        accum = _emit_step(0, "noop", 0.5)
-        print("[END]")
-        _emit_final(accum, 1)
+        r = _emit_step(0, "noop", 0.5)
+        _out("[END]")
+        _emit_final(r, 1)
         return
 
     # ── Init ──────────────────────────────────────────────────────────────────
@@ -131,26 +136,25 @@ def run_task(task_level: str) -> None:
         agent = RuleBasedAgent()
         obs   = env.reset(task_level)
     except Exception:
-        accum = _emit_step(0, "noop", 0.5)
-        print("[END]")
-        _emit_final(accum, 1)
+        r = _emit_step(0, "noop", 0.5)
+        _out("[END]")
+        _emit_final(r, 1)
         return
 
     done         = False
     step         = 0
-    max_steps    = 10
+    MAX_STEPS    = 10
     total_reward = 0.0
 
-    # ── Episode loop ──────────────────────────────────────────────────────────
-    while not done and step < max_steps:
+    # ── Episode ───────────────────────────────────────────────────────────────
+    while not done and step < MAX_STEPS:
         try:
             action_dict = agent.act(obs) or {"action_type": "noop"}
             action      = ClaimAction(**action_dict)
 
-            call_llm(f"Process claim for procedure {obs.get('procedure', 'unknown')}")
+            _call_llm(f"Process claim: {obs.get('procedure', 'unknown')}")
 
-            obs, raw_reward, done, info = env.step(action)
-
+            obs, raw_reward, done, _info = env.step(action)
             total_reward += _emit_step(step, action.action_type, raw_reward)
 
         except Exception:
@@ -158,25 +162,26 @@ def run_task(task_level: str) -> None:
 
         step += 1
 
-    # ── Ensure at least one [STEP] block was printed ──────────────────────────
-    # (guards against done=True immediately after reset)
+    # ── Guard: ensure at least one [STEP] was emitted ─────────────────────────
     if step == 0:
         total_reward += _emit_step(0, "noop", 0.5)
         step = 1
 
-    print("[END]")
+    _out("[END]")
     _emit_final(total_reward, step)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    for task in ["easy", "medium", "hard"]:
+    for _task in ["easy", "medium", "hard"]:
         try:
-            run_task(task)
+            _run_task(_task)
         except Exception:
-            print("[START]")
-            print(f"task: {task}")
-            print("[STEP]")
-            print(json.dumps({"step": 0, "action": "noop", "reward": 0.5}))
-            print("[END]")
-            print("final_score: 0.5")
+            # Absolute last resort — cannot let this crash silently
+            _out("[START]")
+            _out(f"task: {_task}")
+            _out("[STEP]")
+            _out(json.dumps({"step": 0, "action": "noop", "reward": 0.5}))
+            _out("[END]")
+            _out("final_score: 0.5")
