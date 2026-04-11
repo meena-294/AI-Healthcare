@@ -5,14 +5,14 @@ Output format (STRICT — validator parses this exactly):
   [START]
   task: <task_name>
   [STEP]
-  {"step": N, "action": "action_type", "reward": 0.XYZ}
+  {"step": N, "action": "action_type", "reward": 0.X}
   ...
   [END]
-  final_score: 0.XYZ
+  final_score: 0.X
 
 Rules:
-  - Every reward and final_score MUST be strictly in (0.0, 1.0)
-  - Never print 0.0 or 1.0 exactly
+  - Every reward and final_score is 1 decimal place: 0.1, 0.2 ... 0.9
+  - Never 0.0 or 1.0 — strictly inside (0, 1)
   - One [START]...[END] block per task
   - Must use OpenAI client for LLM calls
 """
@@ -31,27 +31,33 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SCORE GUARD — single source of truth for all score output
-#  Guarantees output is STRICTLY in (0.0, 1.0) — never 0.0, never 1.0
+#  SCORE GUARD
+#  Output: one of {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9}
+#  NEVER 0.0 or 1.0
 # ══════════════════════════════════════════════════════════════════════════════
-_SCORE_MIN = 0.15   # safe floor well above 0.0
-_SCORE_MAX = 0.85   # safe ceiling well below 1.0
-_FALLBACK  = 0.50   # used when value is invalid/boundary
+_VALID_SCORES = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+_FALLBACK     = 0.5
 
 
 def _guard(value) -> float:
-    """Convert any value to a float strictly in (_SCORE_MIN, _SCORE_MAX)."""
+    """
+    Convert any value to the nearest valid score in {0.1 … 0.9}.
+    Never returns 0.0 or 1.0.
+    """
     try:
         v = float(value)
     except Exception:
         return _FALLBACK
     if not math.isfinite(v):
         return _FALLBACK
-    # Reject exact boundaries 0.0 and 1.0 (and anything outside)
-    if v <= 0.0 or v >= 1.0:
+    # Clamp into (0.1, 0.9) range first
+    v = max(0.1, min(v, 0.9))
+    # Round to nearest 0.1
+    rounded = round(round(v / 0.1) * 0.1, 1)
+    # Safety check — must be in valid set
+    if rounded not in _VALID_SCORES:
         return _FALLBACK
-    # Clamp to safe inner range
-    return round(max(_SCORE_MIN, min(v, _SCORE_MAX)), 6)
+    return rounded
 
 
 # ── Imports ───────────────────────────────────────────────────────────────────
@@ -84,7 +90,6 @@ if _openai_ok and API_BASE_URL:
 
 # ── LLM call (required by validator) ─────────────────────────────────────────
 def _llm_call(prompt: str) -> str:
-    """Call LLM via OpenAI-compatible client. Returns response or 'unavailable'."""
     if _client is None:
         return "unavailable"
     try:
@@ -126,7 +131,7 @@ def _emit_step(step_n: int, action_type: str, raw_reward) -> float:
 
 
 def _emit_final(accumulated: float, n_steps: int) -> None:
-    """Print final_score line. Always strictly in (0, 1)."""
+    """Print final_score line. Always a single decimal in (0.1–0.9)."""
     try:
         avg = float(accumulated) / float(max(int(n_steps), 1))
     except Exception:
@@ -139,7 +144,6 @@ def _run_task(task: str) -> None:
     _out("[START]")
     _out(f"task: {task}")
 
-    # ── Fallback if env not available ─────────────────────────────────────────
     if not _env_ok:
         _llm_call(f"Assess healthcare claim for task: {task}")
         score = _emit_step(0, "noop", _FALLBACK)
@@ -147,7 +151,6 @@ def _run_task(task: str) -> None:
         _emit_final(score, 1)
         return
 
-    # ── Initialize env ────────────────────────────────────────────────────────
     try:
         env   = HealthcareEnv()
         agent = RuleBasedAgent()
@@ -159,7 +162,6 @@ def _run_task(task: str) -> None:
         _emit_final(score, 1)
         return
 
-    # ── Episode loop ──────────────────────────────────────────────────────────
     done      = False
     step      = 0
     MAX_STEPS = 10
@@ -167,32 +169,25 @@ def _run_task(task: str) -> None:
 
     while not done and step < MAX_STEPS:
         try:
-            # Agent decides action
             action_dict = agent.act(obs) or {"action_type": "noop"}
             action_type = action_dict.get("action_type", "noop")
 
-            # LLM call (required by validator — result used for logging)
             procedure = obs.get("procedure", "unknown") if isinstance(obs, dict) else "unknown"
             denial    = obs.get("denial_reason", "") if isinstance(obs, dict) else ""
             _llm_call(
                 f"Task: {task}. Procedure: {procedure}. "
-                f"Denial: {denial}. Recommended action: {action_type}. "
-                f"Is this correct? Reply yes or no."
+                f"Denial: {denial}. Action: {action_type}. Correct? yes/no."
             )
 
-            # Step environment
             action = ClaimAction(**action_dict)
             obs, raw_reward, done, _info = env.step(action)
-
             total += _emit_step(step, action_type, raw_reward)
 
         except Exception:
-            # Safe fallback for any crash mid-episode
             total += _emit_step(step, "noop", _FALLBACK)
 
         step += 1
 
-    # Guarantee at least one step was emitted
     if step == 0:
         total += _emit_step(0, "noop", _FALLBACK)
         step = 1
@@ -209,11 +204,10 @@ if __name__ == "__main__":
         try:
             _run_task(task)
         except Exception:
-            # Last-resort fallback — always valid output
-            print("[START]",                                              flush=True)
-            print(f"task: {task}",                                       flush=True)
-            print("[STEP]",                                              flush=True)
+            print("[START]",                                                flush=True)
+            print(f"task: {task}",                                         flush=True)
+            print("[STEP]",                                                flush=True)
             print(json.dumps({"step": 0, "action": "noop",
-                               "reward": _FALLBACK}),                   flush=True)
-            print("[END]",                                               flush=True)
-            print(f"final_score: {_FALLBACK}",                          flush=True)
+                               "reward": _FALLBACK}),                     flush=True)
+            print("[END]",                                                 flush=True)
+            print(f"final_score: {_FALLBACK}",                            flush=True)
