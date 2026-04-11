@@ -13,7 +13,6 @@ _CEILING = 0.85
 
 
 def _clamp(value: float) -> float:
-    """Hard clamp to [0.15, 0.85] — strictly inside (0, 1)."""
     try:
         v = float(value)
     except Exception:
@@ -29,15 +28,21 @@ class HealthcareEnv:
         self.state_manager = StateManager()
         self.done          = False
         self.max_steps     = max_steps
-        self.task_level    = "medium"
+        self.task_level    = "easy"
 
-    def reset(self, task_level="medium"):
+    def reset(self, task_level="easy"):
+        if task_level not in ("easy", "medium", "hard"):
+            task_level = "easy"
         claim           = self.state_manager.reset(task_level)
         self.done       = False
         self.task_level = task_level
         return self._get_observation(claim)
 
     def step(self, action: ClaimAction):
+        # Guard: if state is None (reset was never called), auto-reset
+        if self.state_manager.current_claim is None:
+            self.reset(self.task_level)
+
         if self.done:
             return (
                 self._get_observation(self.state_manager.get_state()),
@@ -46,7 +51,12 @@ class HealthcareEnv:
                 {"message": "Episode already completed"},
             )
 
-        claim, result = apply_action(self.state_manager, action)
+        try:
+            claim, result = apply_action(self.state_manager, action)
+        except Exception:
+            claim  = self.state_manager.get_state() or {}
+            result = {"valid": False, "message": "apply_action failed"}
+
         self.state_manager.update(claim)
 
         reward    = self._compute_reward(claim, action, result)
@@ -61,45 +71,51 @@ class HealthcareEnv:
         }
 
     def _compute_reward(self, claim, action, result) -> float:
-        if not result.get("valid", True):
+        try:
+            if not result.get("valid", True):
+                return _FLOOR
+
+            grader_map = {"easy": EasyGrader, "medium": MediumGrader}
+            grader_cls = grader_map.get(self.task_level, HardGrader)
+            grader_score = _clamp(grader_cls(claim).grade(action))
+
+            reward = RewardCalculator(claim).compute(
+                action       = action,
+                grader_score = grader_score,
+                step_count   = self.state_manager.step_count,
+                max_steps    = self.max_steps,
+            )
+            return _clamp(reward)
+        except Exception:
             return _FLOOR
 
-        grader_map = {
-            "easy":   EasyGrader,
-            "medium": MediumGrader,
-        }
-        grader_cls = grader_map.get(self.task_level, HardGrader)
-        grader     = grader_cls(claim)
-        grader_score = _clamp(grader.grade(action))
-
-        calc   = RewardCalculator(claim)
-        reward = calc.compute(
-            action       = action,
-            grader_score = grader_score,
-            step_count   = self.state_manager.step_count,
-            max_steps    = self.max_steps,
-        )
-        return _clamp(reward)
-
     def _check_done(self, claim) -> bool:
-        if claim.get("submitted_code") != claim.get("correct_code"):
-            return False
-        if claim.get("procedure") == "MRI Scan":
-            if "preapproval" not in claim.get("documents", []):
+        try:
+            if claim.get("submitted_code") != claim.get("correct_code"):
                 return False
-        return True
+            if claim.get("procedure") == "MRI Scan":
+                if "preapproval" not in claim.get("documents", []):
+                    return False
+            return True
+        except Exception:
+            return False
 
     def _get_observation(self, state) -> dict:
+        if not state:
+            state = {}
         return {
-            "claim_id":       state.get("claim_id"),
-            "patient_age":    state.get("patient_age"),
-            "procedure":      state.get("procedure"),
-            "submitted_code": state.get("submitted_code"),
-            "correct_code":   state.get("correct_code"),
-            "denial_reason":  state.get("denial_reason"),
-            "policy":         state.get("policy"),
+            "claim_id":       state.get("claim_id", "unknown"),
+            "patient_age":    state.get("patient_age", 30),
+            "procedure":      state.get("procedure", "X-Ray"),
+            "submitted_code": state.get("submitted_code", ""),
+            "correct_code":   state.get("correct_code", ""),
+            "denial_reason":  state.get("denial_reason", ""),
+            "policy":         state.get("policy", "Standard"),
             "documents":      state.get("documents", []),
         }
 
     def state(self) -> dict:
-        return self.state_manager.get_state() or {"status": "running"}
+        try:
+            return self.state_manager.get_state() or {"status": "running"}
+        except Exception:
+            return {"status": "running"}
