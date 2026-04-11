@@ -8,12 +8,17 @@ def _clamp(v):
         return 0.5
     if not math.isfinite(v):
         return 0.5
-    # This keeps scores strictly between 0.1 and 0.9
-    # It ensures you never hit 0.0 or 1.0
+    # Strictly between 0 and 1 — never 0.0 or 1.0
     return max(0.01, min(v, 0.99))
 
 
 class HardGrader:
+    """
+    Hard task: fix code + justification + handle preapproval / senior docs.
+    Score is strictly in (0, 1) — never 0.0 or 1.0 exactly.
+    Max possible = 0.15 + 0.35 + 0.16 + 0.03 = 0.69 → safely under 0.99
+    """
+
     def __init__(self, claim):
         self.claim = claim
 
@@ -24,24 +29,42 @@ class HardGrader:
             documents = self.claim.get("documents", [])
             procedure = self.claim.get("procedure", "")
             age       = self.claim.get("patient_age", 0)
-            score = 0.15
+
+            score = 0.15    # safe base — never starts at 0.0
+
             if action.action_type == "correct_code" and action.new_code:
-                if action.new_code == correct:      score += 0.35
-                elif action.new_code != submitted:  score += 0.15
-                else:                               score += 0.02
+                if action.new_code == correct:
+                    score += 0.35
+                elif action.new_code != submitted:
+                    score += 0.15
+                else:
+                    score += 0.02
+
                 j = len((action.justification or "").strip())
-                if j >= 30:   score += 0.16
-                elif j >= 15: score += 0.08
-                elif j > 0:   score += 0.04
+                if j >= 30:
+                    score += 0.16
+                elif j >= 15:
+                    score += 0.08
+                elif j > 0:
+                    score += 0.04
+
             elif action.action_type == "add_document":
-                needs = (procedure == "MRI Scan" and "preapproval" not in documents)
-                needs_sr = (age > 60 and "senior_approval" not in documents)
-                score += 0.20 if (needs or needs_sr) else 0.06
+                needs_pre    = (procedure == "MRI Scan" and "preapproval" not in documents)
+                needs_senior = (age > 60 and "senior_approval" not in documents)
+                score += 0.20 if (needs_pre or needs_senior) else 0.06
+
             elif action.action_type == "appeal":
                 denial = self.claim.get("denial_reason", "").lower()
-                score += 0.12 if ("not medically necessary" in denial or "not covered" in denial) else 0.04
+                if "not medically necessary" in denial or "not covered" in denial:
+                    score += 0.12
+                else:
+                    score += 0.04
+
+            # Small policy bonus (max 0.03 — won't push over 0.99)
             if "premium" in self.claim.get("policy", "").lower():
                 score += 0.03
+
             return _clamp(score)
+
         except Exception:
             return 0.5
