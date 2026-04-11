@@ -1,3 +1,4 @@
+import math
 from env.state_manager import StateManager
 from env.transition_logic import apply_action
 from models.action import ClaimAction
@@ -7,14 +8,19 @@ from grader.medium_grader import MediumGrader
 from grader.hard_grader import HardGrader
 from reward.reward_calculator import RewardCalculator
 
-# Reward must NEVER be exactly 0.0 or 1.0 — use wide safe margins
-_FLOOR   = 0.05
-_CEILING = 0.95
+_FLOOR   = 0.15
+_CEILING = 0.85
 
 
-def _strict_clamp(value: float) -> float:
-    """Triple-safety clamp: floor=0.05, ceiling=0.95. Impossible to return 0.0 or 1.0."""
-    return max(_FLOOR, min(float(value), _CEILING))
+def _clamp(value: float) -> float:
+    """Hard clamp to [0.15, 0.85] — strictly inside (0, 1)."""
+    try:
+        v = float(value)
+    except Exception:
+        return 0.5
+    if not math.isfinite(v):
+        return 0.5
+    return max(_FLOOR, min(v, _CEILING))
 
 
 class HealthcareEnv:
@@ -25,19 +31,17 @@ class HealthcareEnv:
         self.max_steps     = max_steps
         self.task_level    = "medium"
 
-    # ── RESET ────────────────────────────────────────────────────────────────
     def reset(self, task_level="medium"):
         claim           = self.state_manager.reset(task_level)
         self.done       = False
         self.task_level = task_level
         return self._get_observation(claim)
 
-    # ── STEP ─────────────────────────────────────────────────────────────────
     def step(self, action: ClaimAction):
         if self.done:
             return (
                 self._get_observation(self.state_manager.get_state()),
-                _FLOOR,   # episode already done → safe floor, never 0.0
+                _FLOOR,
                 True,
                 {"message": "Episode already completed"},
             )
@@ -45,49 +49,38 @@ class HealthcareEnv:
         claim, result = apply_action(self.state_manager, action)
         self.state_manager.update(claim)
 
-        reward    = self._calculate_reward_with_grader(claim, action, result)
+        reward    = self._compute_reward(claim, action, result)
         self.done = self._check_done(claim)
 
         if self.done:
             claim["denial_reason"] = "None (Resolved)"
 
-        observation = self._get_observation(claim)
-
-        return observation, reward, self.done, {
+        return self._get_observation(claim), reward, self.done, {
             "action_result": result,
             "step_count":    self.state_manager.step_count,
         }
 
-    # ── REWARD ────────────────────────────────────────────────────────────────
-    def _calculate_reward_with_grader(self, claim, action, result) -> float:
-
-        # Invalid action → safe floor (never 0.0)
+    def _compute_reward(self, claim, action, result) -> float:
         if not result.get("valid", True):
             return _FLOOR
 
-        # Select grader
-        if self.task_level == "easy":
-            grader = EasyGrader(claim)
-        elif self.task_level == "medium":
-            grader = MediumGrader(claim)
-        else:
-            grader = HardGrader(claim)
+        grader_map = {
+            "easy":   EasyGrader,
+            "medium": MediumGrader,
+        }
+        grader_cls = grader_map.get(self.task_level, HardGrader)
+        grader     = grader_cls(claim)
+        grader_score = _clamp(grader.grade(action))
 
-        # grader.grade() already returns value in [0.05, 0.95]
-        grader_score = grader.grade(action)
-
-        reward_calc = RewardCalculator(claim)
-        reward = reward_calc.compute(
+        calc   = RewardCalculator(claim)
+        reward = calc.compute(
             action       = action,
             grader_score = grader_score,
             step_count   = self.state_manager.step_count,
             max_steps    = self.max_steps,
         )
+        return _clamp(reward)
 
-        # Final clamp — belt, suspenders, AND safety pin
-        return _strict_clamp(reward)
-
-    # ── DONE ─────────────────────────────────────────────────────────────────
     def _check_done(self, claim) -> bool:
         if claim.get("submitted_code") != claim.get("correct_code"):
             return False
@@ -96,7 +89,6 @@ class HealthcareEnv:
                 return False
         return True
 
-    # ── OBSERVATION ──────────────────────────────────────────────────────────
     def _get_observation(self, state) -> dict:
         return {
             "claim_id":       state.get("claim_id"),
@@ -109,6 +101,5 @@ class HealthcareEnv:
             "documents":      state.get("documents", []),
         }
 
-    # ── STATE (OpenEnv) ──────────────────────────────────────────────────────
     def state(self) -> dict:
         return self.state_manager.get_state() or {"status": "running"}
