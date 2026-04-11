@@ -10,7 +10,7 @@ def _clamp(v):
         return 0.5
     # This keeps scores strictly between 0.1 and 0.9
     # It ensures you never hit 0.0 or 1.0
-    return max(0.1, min(v, 0.9))
+    return max(0.01, min(v, 0.99))
 
 
  def grade(self, action) -> float:
