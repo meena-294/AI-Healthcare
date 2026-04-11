@@ -1,22 +1,25 @@
 import math
 
+_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
-def _clamp(v):
+def _safe_bucket(v) -> float:
     try:
         v = float(v)
     except Exception:
         return 0.5
     if not math.isfinite(v):
         return 0.5
-    # Strictly between 0 and 1 — never 0.0 or 1.0
-    return max(0.01, min(v, 0.99))
+    if v <= 0.0: return 0.1
+    if v >= 1.0: return 0.9
+    return min(_BUCKETS, key=lambda b: abs(b - v))
 
 
 class HardGrader:
     """
-    Hard task: fix code + justification + handle preapproval / senior docs.
-    Score is strictly in (0, 1) — never 0.0 or 1.0 exactly.
-    Max possible = 0.15 + 0.35 + 0.16 + 0.03 = 0.69 → safely under 0.99
+    Hard task: fix code + justification + preapproval / senior docs.
+    Score is ALWAYS one of: 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9
+    NEVER 0.0 or 1.0
+    Max possible raw = 0.15 + 0.35 + 0.16 + 0.03 = 0.69 → buckets to 0.7
     """
 
     def __init__(self, claim):
@@ -30,7 +33,7 @@ class HardGrader:
             procedure = self.claim.get("procedure", "")
             age       = self.claim.get("patient_age", 0)
 
-            score = 0.15    # safe base — never starts at 0.0
+            score = 0.15  # safe base
 
             if action.action_type == "correct_code" and action.new_code:
                 if action.new_code == correct:
@@ -60,11 +63,10 @@ class HardGrader:
                 else:
                     score += 0.04
 
-            # Small policy bonus (max 0.03 — won't push over 0.99)
             if "premium" in self.claim.get("policy", "").lower():
                 score += 0.03
 
-            return _clamp(score)
+            return _safe_bucket(score)
 
         except Exception:
             return 0.5
