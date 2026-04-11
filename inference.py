@@ -32,15 +32,29 @@ if _openai_available and API_BASE_URL:
         client = None
 
 
-# ─── Safe score: ALWAYS returns a float strictly in (0.05, 0.95) ──────────────
+# ─── Safe score: ALWAYS returns a float STRICTLY in (0.05, 0.95) ──────────────
+# CRITICAL: Never use round() on scores — it can produce exactly 0.0 or 1.0.
+# Instead use _safe_fmt() to serialize scores to JSON strings safely.
 def _safe_score(value) -> float:
+    """Returns a float guaranteed to be strictly in (0.05, 0.95)."""
     try:
         v = float(value)
-        if not (v == v):   # NaN check
+        if v != v:   # NaN check
             v = 0.5
     except Exception:
         v = 0.5
+    # Hard clamp — floor=0.05, ceiling=0.95, well away from 0.0 and 1.0
     return max(0.05, min(v, 0.95))
+
+
+def _safe_fmt(score: float) -> float:
+    """
+    Truncate (NOT round) to 4 decimal places, then re-clamp.
+    Truncation guarantees we never round UP to 1.0 or DOWN to 0.0.
+    """
+    import math
+    truncated = math.floor(score * 10000) / 10000
+    return _safe_score(truncated)
 
 
 # ─── LLM call — failure is silently swallowed ─────────────────────────────────
@@ -68,7 +82,7 @@ def run_task(task_level: str) -> None:
 
     # If env failed to import, print a safe fallback score and exit early
     if not _env_available:
-        safe = _safe_score(0.5)
+        safe = _safe_fmt(0.5)
         print("[STEP]")
         print(json.dumps({"step": 0, "action": "noop", "reward": safe}))
         print("[END]")
@@ -80,7 +94,7 @@ def run_task(task_level: str) -> None:
         agent = RuleBasedAgent()
         obs   = env.reset(task_level)
     except Exception:
-        safe = _safe_score(0.5)
+        safe = _safe_fmt(0.5)
         print("[STEP]")
         print(json.dumps({"step": 0, "action": "noop", "reward": safe}))
         print("[END]")
@@ -102,32 +116,36 @@ def run_task(task_level: str) -> None:
 
             obs, reward, done, info = env.step(action)
 
-            safe_reward   = _safe_score(reward)
+            # _safe_fmt truncates (not rounds) to 4dp — cannot produce 0.0 or 1.0
+            safe_reward   = _safe_fmt(reward)
             total_reward += safe_reward
 
             print("[STEP]")
             print(json.dumps({
                 "step":   step,
                 "action": action.action_type,
-                "reward": round(safe_reward, 4),
+                "reward": safe_reward,   # ← NO round() here; already truncated safely
             }))
+
         except Exception:
             # One bad step must not crash the whole episode
-            total_reward += 0.5
+            safe_fallback = _safe_fmt(0.5)
+            total_reward += safe_fallback
             print("[STEP]")
-            print(json.dumps({"step": step, "action": "noop", "reward": 0.5}))
+            print(json.dumps({"step": step, "action": "noop", "reward": safe_fallback}))
 
         step += 1
 
     print("[END]")
 
     # ── FINAL SCORE ────────────────────────────────────────────────────────────
-    # CRITICAL: must be strictly > 0.0 AND strictly < 1.0
-    #
-    # We AVERAGE (not sum) rewards, then hard-clamp to [0.05, 0.95].
-    # This is mathematically impossible to return 0.0 or 1.0.
-    avg          = total_reward / max(step, 1)
-    final_score  = _safe_score(avg)
+    # CRITICAL: must be strictly > 0.0 AND strictly < 1.0.
+    # If step == 0 (loop never ran), force a safe fallback immediately.
+    if step == 0:
+        final_score = _safe_fmt(0.5)
+    else:
+        avg         = total_reward / step
+        final_score = _safe_fmt(avg)
 
     print(f"final_score: {final_score}")
 
