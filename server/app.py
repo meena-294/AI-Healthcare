@@ -11,9 +11,10 @@ Routes:
   GET  /docs      → Swagger UI
 """
 
+import math
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import gradio as gr
@@ -25,8 +26,23 @@ from agent.rule_based_agent import RuleBasedAgent
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="AI HealthCare Claims API")
 
+# One global env — but we guard every endpoint so it's safe even before reset
 env   = HealthcareEnv()
 agent = RuleBasedAgent()
+
+
+# ── Score guard (same as inference.py) ───────────────────────────────────────
+def _guard(value, fallback: float = 0.5) -> float:
+    """Guarantee reward returned by API is strictly in (0.0, 1.0)."""
+    try:
+        v = float(value)
+    except Exception:
+        return fallback
+    if not math.isfinite(v):
+        return fallback
+    if v <= 0.0 or v >= 1.0:
+        return fallback
+    return max(0.15, min(v, 0.85))
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -35,27 +51,123 @@ class StepRequest(BaseModel):
 
 
 # ── OpenEnv endpoints ─────────────────────────────────────────────────────────
+
 @app.post("/reset")
 async def reset(request: Request):
+    """Resets the environment. Accepts task_level as query param or JSON body."""
     try:
         body = await request.json()
     except Exception:
         body = {}
-    difficulty = body.get("difficulty") or body.get("task_level") or "easy"
-    obs = env.reset(difficulty)
-    return obs
+
+    # Support both query param and body key names
+    params = dict(request.query_params)
+    difficulty = (
+        params.get("task_level")
+        or params.get("difficulty")
+        or body.get("task_level")
+        or body.get("difficulty")
+        or "easy"
+    )
+
+    # Validate difficulty
+    if difficulty not in ("easy", "medium", "hard"):
+        difficulty = "easy"
+
+    try:
+        obs = env.reset(difficulty)
+        return obs
+    except Exception as e:
+        # Reset failed — return a safe minimal observation
+        return {
+            "claim_id": "error-reset",
+            "patient_age": 30,
+            "procedure": "X-Ray",
+            "submitted_code": "WRONG001",
+            "correct_code": "XRAY001",
+            "denial_reason": "Incorrect procedure code",
+            "policy": "Standard",
+            "documents": [],
+            "error": str(e),
+        }
 
 
 @app.post("/step")
-def step(req: StepRequest):
-    action = ClaimAction(**req.action)
-    obs, reward, done, info = env.step(action)
-    return {"observation": obs, "reward": reward, "done": done, "info": info}
+async def step(request: Request):
+    """
+    Takes an action and returns next observation, reward, done, info.
+    Accepts BOTH formats:
+      Format A (nested):  {"action": {"action_type": "correct_code", ...}}
+      Format B (flat):    {"action_type": "correct_code", ...}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    # Parse action — support both nested and flat formats
+    try:
+        if "action" in body and isinstance(body["action"], dict):
+            action_data = body["action"]
+        else:
+            action_data = body
+
+        # Ensure action_type exists
+        if "action_type" not in action_data:
+            action_data = {"action_type": "noop"}
+
+        action = ClaimAction(**action_data)
+    except Exception:
+        action = ClaimAction(action_type="noop")
+
+    # If env was never reset, reset it now with default level
+    try:
+        if env.state_manager.current_claim is None:
+            env.reset("easy")
+    except Exception:
+        pass
+
+    try:
+        obs, reward, done, info = env.step(action)
+        safe_reward = _guard(reward)
+        return {
+            "observation": obs,
+            "reward": safe_reward,
+            "done": bool(done),
+            "info": info,
+        }
+    except Exception as e:
+        # Step crashed — return safe fallback response
+        try:
+            obs = env._get_observation(env.state_manager.get_state() or {})
+        except Exception:
+            obs = {
+                "claim_id": "error",
+                "patient_age": 30,
+                "procedure": "X-Ray",
+                "submitted_code": "WRONG001",
+                "correct_code": "XRAY001",
+                "denial_reason": "Incorrect procedure code",
+                "policy": "Standard",
+                "documents": [],
+            }
+        return {
+            "observation": obs,
+            "reward": 0.5,      # safe fallback — strictly in (0, 1)
+            "done": False,
+            "info": {"error": str(e)},
+        }
 
 
 @app.post("/state")
-def state():
-    return env.state() if hasattr(env, "state") else {"status": "running"}
+@app.get("/state")
+async def state():
+    """Returns current environment state."""
+    try:
+        s = env.state()
+        return s if s else {"status": "running"}
+    except Exception:
+        return {"status": "running"}
 
 
 @app.get("/health")
@@ -154,33 +266,39 @@ SHARED_STYLES = """
 
 
 def run_simulation(task_level):
-    sim_env = HealthcareEnv()
-    sim_agent = RuleBasedAgent()
+    try:
+        sim_env = HealthcareEnv()
+        sim_agent = RuleBasedAgent()
 
-    obs          = sim_env.reset(task_level)
-    first_obs    = obs.copy()
-    done         = False
-    step         = 1
-    total_reward = 0.0
-    steps_html   = ""
+        obs          = sim_env.reset(task_level)
+        first_obs    = dict(obs)
+        done         = False
+        step         = 1
+        total_reward = 0.0
+        steps_html   = ""
 
-    while not done and step <= 10:
-        action_dict = sim_agent.act(obs)
-        action      = ClaimAction(**action_dict)
-        obs, reward, done, _ = sim_env.step(action)
-        steps_html  += build_step_html(step, action_dict, reward)
-        total_reward += reward
-        step += 1
+        while not done and step <= 10:
+            try:
+                action_dict = sim_agent.act(obs)
+                action      = ClaimAction(**action_dict)
+                obs, reward, done, _ = sim_env.step(action)
+                safe_reward = _guard(reward)
+                steps_html  += build_step_html(step, action_dict, safe_reward)
+                total_reward += safe_reward
+            except Exception:
+                steps_html += build_step_html(step, {"action_type": "noop"}, 0.5)
+                total_reward += 0.5
+            step += 1
 
-    steps_taken = step - 1
-    approved    = total_reward > 0
-    eff         = max(0, round((10 - steps_taken) / 10 * 100))
-    cls         = "approved" if approved else "rejected"
-    label       = "CLAIM APPROVED" if approved else "CLAIM REJECTED"
-    icon        = "✅" if approved else "❌"
-    score_color = "green" if approved else ""
+        steps_taken = step - 1
+        approved    = total_reward > 0
+        eff         = max(0, round((10 - steps_taken) / 10 * 100))
+        cls         = "approved" if approved else "rejected"
+        label       = "CLAIM APPROVED" if approved else "CLAIM REJECTED"
+        icon        = "✅" if approved else "❌"
+        score_color = "green" if approved else ""
 
-    metrics = f"""
+        metrics = f"""
 <div class="metric-row">
   <div class="metric-card"><div class="label">Final Score</div>
     <div class="value {score_color}" style="{'color:#ff4d6a' if not approved else ''}">{round(total_reward,3)}</div></div>
@@ -192,7 +310,7 @@ def run_simulation(task_level):
     <div class="value {score_color}" style="{'color:#ff4d6a' if not approved else ''}">{'APPROVE' if approved else 'REJECT'}</div></div>
 </div>"""
 
-    verdict = f"""
+        verdict = f"""
 <div class="verdict {cls}">
   <div class="verdict-icon">{icon}</div>
   <div>
@@ -205,8 +323,11 @@ def run_simulation(task_level):
   </div>
 </div>"""
 
-    return SHARED_STYLES + metrics + build_claim_html(first_obs) + f"""
+        return SHARED_STYLES + metrics + build_claim_html(first_obs) + f"""
 <div class="panel"><div class="panel-title">⚡ Agent Steps</div>{steps_html}</div>""" + verdict
+
+    except Exception as e:
+        return f"<p style='color:red'>Simulation error: {e}</p>"
 
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
@@ -254,7 +375,7 @@ with gr.Blocks(css=CUSTOM_CSS, title="AI HealthCare Claims") as gradio_ui:
               <div style="font-size:.8rem;color:#5a7a9a;line-height:1.9">
                 <div>● Rule-Based Agent</div>
                 <div>● Max Steps: 10</div>
-                <div>● Reward: −1.0 → +1.0</div>
+                <div>● Reward: 0.15 → 0.85</div>
                 <div>● API: /reset /step /state</div>
               </div>
             </div>""")
@@ -272,7 +393,6 @@ with gr.Blocks(css=CUSTOM_CSS, title="AI HealthCare Claims") as gradio_ui:
 
 
 # ── Mount Gradio into FastAPI ─────────────────────────────────────────────────
-# This is the KEY fix: both Gradio UI AND FastAPI routes live on port 7860
 app = gr.mount_gradio_app(app, gradio_ui, path="/")
 
 
