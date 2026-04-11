@@ -33,4 +33,4 @@ action_space:
 
 reward:
   type: float
-  range: [0.01, 0.99]
+  range: [0.1, 0.9]
