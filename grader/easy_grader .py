@@ -1,7 +1,20 @@
+import math
+
+
+def _strict_clamp(value: float) -> float:
+    try:
+        v = float(value)
+    except Exception:
+        return 0.5
+    if not math.isfinite(v):
+        return 0.5
+    return max(0.1, min(v, 0.9))
+
+
 class EasyGrader:
     """
     Easy task: agent must correct the procedure code.
-    Score is STRICTLY in (0, 1) — never 0.0 or 1.0 exactly.
+    Score is STRICTLY in (0.1, 0.9) ⊂ (0, 1) — never 0.0 or 1.0.
     """
 
     def __init__(self, claim):
@@ -13,7 +26,7 @@ class EasyGrader:
 
         if action.action_type == "correct_code" and action.new_code:
             if action.new_code == correct:
-                raw = 0.92
+                raw = 0.88
             elif action.new_code != submitted:
                 raw = 0.45
             else:
@@ -23,11 +36,6 @@ class EasyGrader:
         elif action.action_type == "appeal":
             raw = 0.12
         else:
-            raw = 0.08   # noop — was 0.05, bumped away from edge
+            raw = 0.10
 
         return _strict_clamp(raw)
-
-
-def _strict_clamp(value: float) -> float:
-    """Guarantee strictly open interval (0, 1) — hard floor 0.05, hard ceiling 0.95."""
-    return max(0.05, min(float(value), 0.95))
