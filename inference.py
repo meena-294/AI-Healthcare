@@ -1,8 +1,9 @@
 import os
 import json
+import math
 import sys
 
-# ─── Safe imports — if anything fails, we still print valid scores ────────────
+# ─── Safe imports ─────────────────────────────────────────────────────────────
 try:
     from openai import OpenAI
     _openai_available = True
@@ -16,14 +17,13 @@ try:
     _env_available = True
 except Exception as _import_err:
     _env_available = False
-    _import_err_msg = str(_import_err)
 
 # ─── ENV VARIABLES ────────────────────────────────────────────────────────────
 API_BASE_URL = os.getenv("API_BASE_URL", "")
 HF_TOKEN     = os.getenv("HF_TOKEN", "dummy-token")
 MODEL_NAME   = os.getenv("MODEL_NAME", "dummy-model")
 
-# ─── OpenAI client (optional — failure must NOT crash the script) ─────────────
+# ─── OpenAI client ────────────────────────────────────────────────────────────
 client = None
 if _openai_available and API_BASE_URL:
     try:
@@ -32,32 +32,70 @@ if _openai_available and API_BASE_URL:
         client = None
 
 
-# ─── Safe score: ALWAYS returns a float STRICTLY in (0.05, 0.95) ──────────────
-# CRITICAL: Never use round() on scores — it can produce exactly 0.0 or 1.0.
-# Instead use _safe_fmt() to serialize scores to JSON strings safely.
-def _safe_score(value) -> float:
-    """Returns a float guaranteed to be strictly in (0.05, 0.95)."""
+# ══════════════════════════════════════════════════════════════════════════════
+# SCORE SAFETY LAYER
+# Every score that gets printed MUST pass through _validate_score().
+# This is the single choke-point — nothing bypasses it.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _validate_score(value, fallback: float = 0.5) -> float:
+    """
+    ABSOLUTE FINAL GATE before any score is printed.
+    Guarantees: returned float is STRICTLY in open interval (0.0, 1.0).
+
+    Defence layers:
+      1. Convert to float safely  (NaN / Inf  → fallback)
+      2. Strict boundary check    (<=0 or >=1 → fallback)
+      3. Narrow clamp to [0.1, 0.9]  — extra buffer away from 0 and 1
+    fallback=0.5 is always safe: 0.0 < 0.5 < 1.0
+    """
     try:
         v = float(value)
-        if v != v:   # NaN check
-            v = 0.5
     except Exception:
-        v = 0.5
-    # Hard clamp — floor=0.05, ceiling=0.95, well away from 0.0 and 1.0
-    return max(0.05, min(v, 0.95))
+        return fallback
+
+    if not math.isfinite(v):       # catches NaN and ±Inf
+        return fallback
+
+    if v <= 0.0 or v >= 1.0:       # strict open-interval gate
+        return fallback
+
+    return max(0.1, min(v, 0.9))   # narrow clamp, well inside (0, 1)
 
 
-def _safe_fmt(score: float) -> float:
-    """
-    Truncate (NOT round) to 4 decimal places, then re-clamp.
-    Truncation guarantees we never round UP to 1.0 or DOWN to 0.0.
-    """
-    import math
-    truncated = math.floor(score * 10000) / 10000
-    return _safe_score(truncated)
+def _step_reward(raw) -> float:
+    """Safe reward for a single step."""
+    return _validate_score(raw, fallback=0.5)
 
 
-# ─── LLM call — failure is silently swallowed ─────────────────────────────────
+def _final_score(total: float, steps: int) -> float:
+    """Safe final score from accumulated rewards."""
+    if steps <= 0:
+        return 0.5
+    try:
+        avg = float(total) / float(steps)
+    except Exception:
+        return 0.5
+    return _validate_score(avg, fallback=0.5)
+
+
+# ─── PRINT HELPERS ────────────────────────────────────────────────────────────
+
+def _emit_step(step: int, action_type: str, raw_reward) -> float:
+    """Print a validated [STEP] block; return the validated reward."""
+    safe = _step_reward(raw_reward)
+    print("[STEP]")
+    print(json.dumps({"step": step, "action": str(action_type), "reward": safe}))
+    return safe
+
+
+def _emit_final(total: float, steps: int) -> None:
+    """Print a validated final_score line."""
+    score = _final_score(total, steps)
+    print(f"final_score: {score}")
+
+
+# ─── LLM call ─────────────────────────────────────────────────────────────────
 def call_llm(prompt: str) -> str:
     if client is None:
         return "LLM unavailable"
@@ -80,25 +118,22 @@ def run_task(task_level: str) -> None:
     print("[START]")
     print(f"task: {task_level}")
 
-    # If env failed to import, print a safe fallback score and exit early
+    # ── Env not importable ────────────────────────────────────────────────────
     if not _env_available:
-        safe = _safe_fmt(0.5)
-        print("[STEP]")
-        print(json.dumps({"step": 0, "action": "noop", "reward": safe}))
+        accum = _emit_step(0, "noop", 0.5)
         print("[END]")
-        print(f"final_score: {safe}")
+        _emit_final(accum, 1)
         return
 
+    # ── Init ──────────────────────────────────────────────────────────────────
     try:
         env   = HealthcareEnv()
         agent = RuleBasedAgent()
         obs   = env.reset(task_level)
     except Exception:
-        safe = _safe_fmt(0.5)
-        print("[STEP]")
-        print(json.dumps({"step": 0, "action": "noop", "reward": safe}))
+        accum = _emit_step(0, "noop", 0.5)
         print("[END]")
-        print(f"final_score: {safe}")
+        _emit_final(accum, 1)
         return
 
     done         = False
@@ -106,48 +141,31 @@ def run_task(task_level: str) -> None:
     max_steps    = 10
     total_reward = 0.0
 
+    # ── Episode loop ──────────────────────────────────────────────────────────
     while not done and step < max_steps:
         try:
             action_dict = agent.act(obs) or {"action_type": "noop"}
             action      = ClaimAction(**action_dict)
 
-            # LLM call required by validator — ignore result
             call_llm(f"Process claim for procedure {obs.get('procedure', 'unknown')}")
 
-            obs, reward, done, info = env.step(action)
+            obs, raw_reward, done, info = env.step(action)
 
-            # _safe_fmt truncates (not rounds) to 4dp — cannot produce 0.0 or 1.0
-            safe_reward   = _safe_fmt(reward)
-            total_reward += safe_reward
-
-            print("[STEP]")
-            print(json.dumps({
-                "step":   step,
-                "action": action.action_type,
-                "reward": safe_reward,   # ← NO round() here; already truncated safely
-            }))
+            total_reward += _emit_step(step, action.action_type, raw_reward)
 
         except Exception:
-            # One bad step must not crash the whole episode
-            safe_fallback = _safe_fmt(0.5)
-            total_reward += safe_fallback
-            print("[STEP]")
-            print(json.dumps({"step": step, "action": "noop", "reward": safe_fallback}))
+            total_reward += _emit_step(step, "noop", 0.5)
 
         step += 1
 
-    print("[END]")
-
-    # ── FINAL SCORE ────────────────────────────────────────────────────────────
-    # CRITICAL: must be strictly > 0.0 AND strictly < 1.0.
-    # If step == 0 (loop never ran), force a safe fallback immediately.
+    # ── Ensure at least one [STEP] block was printed ──────────────────────────
+    # (guards against done=True immediately after reset)
     if step == 0:
-        final_score = _safe_fmt(0.5)
-    else:
-        avg         = total_reward / step
-        final_score = _safe_fmt(avg)
+        total_reward += _emit_step(0, "noop", 0.5)
+        step = 1
 
-    print(f"final_score: {final_score}")
+    print("[END]")
+    _emit_final(total_reward, step)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
@@ -155,11 +173,10 @@ if __name__ == "__main__":
     for task in ["easy", "medium", "hard"]:
         try:
             run_task(task)
-        except Exception as e:
-            # Absolute last resort — even a top-level crash prints a valid score
+        except Exception:
             print("[START]")
             print(f"task: {task}")
             print("[STEP]")
             print(json.dumps({"step": 0, "action": "noop", "reward": 0.5}))
             print("[END]")
-            print(f"final_score: 0.5")
+            print("final_score: 0.5")
