@@ -1,22 +1,17 @@
 import math
 
 
-def _strict_clamp(value: float) -> float:
+def _clamp(v):
     try:
-        v = float(value)
+        v = float(v)
     except Exception:
         return 0.5
     if not math.isfinite(v):
         return 0.5
-    return max(0.1, min(v, 0.9))
+    return max(0.15, min(v, 0.85))
 
 
 class EasyGrader:
-    """
-    Easy task: agent must correct the procedure code.
-    Score is STRICTLY in (0.1, 0.9) ⊂ (0, 1) — never 0.0 or 1.0.
-    """
-
     def __init__(self, claim):
         self.claim = claim
 
@@ -26,16 +21,16 @@ class EasyGrader:
 
         if action.action_type == "correct_code" and action.new_code:
             if action.new_code == correct:
-                raw = 0.88
+                raw = 0.82
             elif action.new_code != submitted:
                 raw = 0.45
             else:
-                raw = 0.15
+                raw = 0.20
         elif action.action_type == "add_document":
-            raw = 0.20
+            raw = 0.22
         elif action.action_type == "appeal":
-            raw = 0.12
+            raw = 0.18
         else:
-            raw = 0.10
+            raw = 0.15   # noop
 
-        return _strict_clamp(raw)
+        return _clamp(raw)
